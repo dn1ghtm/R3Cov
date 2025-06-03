@@ -79,7 +79,7 @@ function Get-NetworkInformation {
             $info += "`nAdapter: $($adapter.Name)"
             $info += "Description: $($adapter.InterfaceDescription)"
             $info += "MAC Address: $($adapter.MacAddress)"
-            $info += "Speed: $($adapter.LinkSpeed / 1Gbps) Gbps" # Format speed
+            $info += "Speed: $([math]::Round($adapter.LinkSpeed / 1e9, 2)) Gbps" # Format speed
             $info += "Status: $($adapter.Status)"
             
             # Get IP configuration
