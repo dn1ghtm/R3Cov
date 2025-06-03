@@ -1,0 +1,491 @@
+# WinTool.ps1 - Windows System Tools GUI
+# Requires Windows Forms
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+#region Function Definitions
+
+# Function to show the selected content panel
+function Show-Panel($idx) {
+    $contentPanel.Controls.Clear()
+    if ($idx -ge 0 -and $idx -lt $panels.Count) {
+        $contentPanel.Controls.Add($panels[$idx])
+        # Highlight selected sidebar button
+        for ($j = 0; $j -lt $sidebarButtons.Count; $j++) {
+            if ($j -eq $idx) {
+                $sidebarButtons[$j].BackColor = [System.Drawing.Color]::FromArgb(180, 200, 240)
+            } else {
+                $sidebarButtons[$j].BackColor = [System.Drawing.Color]::FromArgb(220, 230, 250)
+            }
+        }
+    }
+}
+
+# Function to get Windows Product Key
+function Get-WindowsProductKey {
+    try {
+        $regPath = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
+        $digitalProductId = (Get-ItemProperty -Path $regPath -Name "DigitalProductId").DigitalProductId
+        $productKey = ""
+        
+        # Decode the DigitalProductId
+        $map = "BCDFGHJKMPQRTVWXY2346789"
+        for ($i = 24; $i -ge 0; $i--) {
+            $r = 0
+            for ($j = 14; $j -ge 0; $j--) {
+                $r = ($r -shl 8) -bxor $digitalProductId[$j]
+                $digitalProductId[$j] = [math]::Floor($r / 24)
+                $r = $r % 24
+            }
+            $productKey = $map[$r] + $productKey
+            if (($i % 5) -eq 0 -and $i -ne 0) {
+                $productKey = "-" + $productKey
+            }
+        }
+        return $productKey
+    }
+    catch {
+        return "Unable to retrieve product key: $($_.Exception.Message)"
+    }
+}
+
+# Function to get detailed system information
+function Get-DetailedSystemInfo {
+    $info = @()
+    $info += "=== System Information ==="
+    $info += "Computer Name: $env:COMPUTERNAME"
+    $info += "Windows Version: $( (Get-WmiObject -Class Win32_OperatingSystem).Caption )"
+    $info += "OS Architecture: $( (Get-WmiObject -Class Win32_OperatingSystem).OSArchitecture )"
+    $info += "System Type: $( (Get-WmiObject -Class Win32_ComputerSystem).SystemType )"
+    $info += "Processor: $( (Get-WmiObject -Class Win32_Processor).Name )"
+    $info += "Total Physical Memory: $([math]::Round((Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)) GB"
+    $info += "Available Physical Memory: $([math]::Round((Get-WmiObject -Class Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)) MB" # Changed to MB for consistency
+    $info += "System Drive: $( (Get-WmiObject -Class Win32_OperatingSystem).SystemDrive )"
+    $info += "System Directory: $( (Get-WmiObject -Class Win32_OperatingSystem).SystemDirectory )"
+    $cimLastBoot = Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object LastBootUpTime
+    $info += "Last Boot Time: $($cimLastBoot.LastBootUpTime)"
+    return $info -join "`r`n"
+}
+
+# Function to get network information
+function Get-NetworkInformation {
+    $info = @()
+    $info += "=== Network Information ==="
+    
+    # Get network adapters
+    $adapters = Get-NetAdapter | Where-Object {$_.Status -eq "Up"}
+    if ($adapters) {
+        foreach ($adapter in $adapters) {
+            $info += "`nAdapter: $($adapter.Name)"
+            $info += "Description: $($adapter.InterfaceDescription)"
+            $info += "MAC Address: $($adapter.MacAddress)"
+            $info += "Speed: $($adapter.LinkSpeed / 1Gbps) Gbps" # Format speed
+            $info += "Status: $($adapter.Status)"
+            
+            # Get IP configuration
+            $ipConfig = Get-NetIPConfiguration -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue
+            if ($ipConfig) {
+                if ($ipConfig.IPv4Address.IPAddress) {
+                    $info += "IPv4 Address: $($ipConfig.IPv4Address.IPAddress)"
+                    $info += "Subnet Mask: $($ipConfig.IPv4Address.PrefixLength)"
+                }
+                if ($ipConfig.IPv4DefaultGateway.NextHop) {
+                    $info += "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)"
+                }
+                if ($ipConfig.DNSServer.ServerAddresses) {
+                    $info += "DNS Servers: $($ipConfig.DNSServer.ServerAddresses -join ', ')"
+                }
+            } else {
+                $info += "IP Configuration: Not available"
+            }
+        }
+    } else {
+        $info += "No active network adapters found."
+    }
+    
+    return $info -join "`r`n"
+}
+
+# Function to get backup product key (from registry backup or file if available)
+function Get-BackupProductKey {
+    try {
+        # This path is more standard for OEM keys stored in firmware
+        $firmwareKey = (Get-WmiObject -query 'select * from SoftwareLicensingService').OA3xOriginalProductKey
+        if ($firmwareKey) {
+            return "Firmware (OEM) Key: $firmwareKey"
+        }
+        
+        # Attempt to get key from SoftwareProtectionPlatform (less common for "backup")
+        $backupPath = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SoftwareProtectionPlatform"
+        $backupKeyProperty = Get-ItemProperty -Path $backupPath -Name "BackupProductKeyDefault" -ErrorAction SilentlyContinue
+        if ($backupKeyProperty -and $backupKeyProperty.BackupProductKeyDefault) {
+            return "Registry Backup Key: $($backupKeyProperty.BackupProductKeyDefault)"
+        } else {
+            return "No specific backup product key found in common locations."
+        }
+    } catch {
+        return "Unable to retrieve backup product key: $($_.Exception.Message)"
+    }
+}
+
+#endregion Function Definitions
+
+# Create the main form
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Windows System Tools"
+$form.Size = New-Object System.Drawing.Size(800,600)
+$form.StartPosition = "CenterScreen"
+$form.BackColor = [System.Drawing.Color]::FromArgb(240, 245, 255)
+
+# Remove old tab control and related controls from the form
+$form.Controls.Clear()
+
+# Banner/Header
+$banner = New-Object System.Windows.Forms.Panel
+$banner.Size = New-Object System.Drawing.Size(800, 60)
+$banner.Location = New-Object System.Drawing.Point(0, 0)
+$banner.BackColor = [System.Drawing.Color]::FromArgb(30, 60, 120)
+
+$bannerIcon = New-Object System.Windows.Forms.Label
+$bannerIcon.Text = "[W]"
+$bannerIcon.Font = New-Object System.Drawing.Font("Segoe UI", 28, [System.Drawing.FontStyle]::Bold)
+$bannerIcon.ForeColor = [System.Drawing.Color]::White
+$bannerIcon.AutoSize = $true
+$bannerIcon.Location = New-Object System.Drawing.Point(20, 8)
+$banner.Controls.Add($bannerIcon)
+
+$bannerTitle = New-Object System.Windows.Forms.Label
+$bannerTitle.Text = "WinTool Suite"
+$bannerTitle.Font = New-Object System.Drawing.Font("Segoe UI", 20, [System.Drawing.FontStyle]::Bold)
+$bannerTitle.ForeColor = [System.Drawing.Color]::White
+$bannerTitle.AutoSize = $true
+$bannerTitle.Location = New-Object System.Drawing.Point(70, 12)
+$banner.Controls.Add($bannerTitle)
+
+$bannerSubtitle = New-Object System.Windows.Forms.Label
+$bannerSubtitle.Text = "Modern Windows Utility Toolkit"
+$bannerSubtitle.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Regular)
+$bannerSubtitle.ForeColor = [System.Drawing.Color]::White
+$bannerSubtitle.AutoSize = $true
+$bannerSubtitle.Location = New-Object System.Drawing.Point(72, 38)
+$banner.Controls.Add($bannerSubtitle)
+
+$form.Controls.Add($banner)
+
+# Sidebar Navigation
+$sidebar = New-Object System.Windows.Forms.Panel
+$sidebar.Size = New-Object System.Drawing.Size(170, 540)
+$sidebar.Location = New-Object System.Drawing.Point(0, 60)
+$sidebar.BackColor = [System.Drawing.Color]::FromArgb(220, 230, 250)
+$form.Controls.Add($sidebar)
+
+# Main Content Panel
+$contentPanel = New-Object System.Windows.Forms.Panel
+$contentPanel.Size = New-Object System.Drawing.Size(630, 540)
+$contentPanel.Location = New-Object System.Drawing.Point(170, 60)
+$contentPanel.BackColor = [System.Drawing.Color]::FromArgb(245, 248, 255)
+$form.Controls.Add($contentPanel)
+
+# Status Bar
+$statusBar = New-Object System.Windows.Forms.StatusStrip
+$statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
+$statusLabel.Text = "Ready."
+$statusBar.Items.Add($statusLabel)
+$form.Controls.Add($statusBar)
+
+# Sidebar Buttons
+$sidebarButtons = @()
+$sidebarNames = @("System Info", "Product Key", "Network Info", "Install Tools", "About")
+$sidebarIcons = @("[S]", "[K]", "[N]", "[I]", "[?]")
+for ($i = 0; $i -lt $sidebarNames.Count; $i++) {
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "$($sidebarIcons[$i]) $($sidebarNames[$i])"
+    $btn.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Regular)
+    $btn.Size = New-Object System.Drawing.Size(160, 50)
+    $yPos = 10 + (55 * $i) # Pre-calculate Y position
+    $btn.Location = New-Object System.Drawing.Point(5, $yPos)
+    $btn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btn.BackColor = [System.Drawing.Color]::FromArgb(220, 230, 250)
+    $btn.ForeColor = [System.Drawing.Color]::FromArgb(30, 60, 120)
+    $btn.FlatAppearance.BorderSize = 0
+    $btn.TabStop = $false
+    $sidebar.Controls.Add($btn)
+    $sidebarButtons += $btn
+}
+
+# --- Content Panels for Each Section ---
+
+# System Info Panel
+$panelSys = New-Object System.Windows.Forms.Panel
+$panelSys.Size = $contentPanel.Size
+$panelSys.BackColor = $contentPanel.BackColor
+
+$groupSys = New-Object System.Windows.Forms.GroupBox
+$groupSys.Text = "System Information"
+$groupSys.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$groupSys.Size = New-Object System.Drawing.Size(600, 420)
+$groupSys.Location = New-Object System.Drawing.Point(15, 15)
+$groupSys.BackColor = [System.Drawing.Color]::FromArgb(235, 240, 255)
+
+$systemInfoTextBox = New-Object System.Windows.Forms.TextBox
+$systemInfoTextBox.Multiline = $true
+$systemInfoTextBox.ScrollBars = "Vertical"
+$systemInfoTextBox.Size = New-Object System.Drawing.Size(570, 320)
+$systemInfoTextBox.Location = New-Object System.Drawing.Point(15, 40)
+$systemInfoTextBox.ReadOnly = $true
+$systemInfoTextBox.Font = New-Object System.Drawing.Font("Consolas", 11)
+$groupSys.Controls.Add($systemInfoTextBox)
+
+$btnCopySys = New-Object System.Windows.Forms.Button
+$btnCopySys.Text = "Copy"
+$btnCopySys.Size = New-Object System.Drawing.Size(80, 32)
+$btnCopySys.Location = New-Object System.Drawing.Point(400, 370)
+$btnCopySys.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnCopySys.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnCopySys.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnCopySys.Add_Click({
+    [System.Windows.Forms.Clipboard]::SetText($systemInfoTextBox.Text)
+    $statusLabel.Text = "System info copied to clipboard."
+})
+$groupSys.Controls.Add($btnCopySys)
+
+$btnRefreshSys = New-Object System.Windows.Forms.Button
+$btnRefreshSys.Text = "Refresh"
+$btnRefreshSys.Size = New-Object System.Drawing.Size(80, 32)
+$btnRefreshSys.Location = New-Object System.Drawing.Point(500, 370)
+$btnRefreshSys.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnRefreshSys.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnRefreshSys.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnRefreshSys.Add_Click({
+    $systemInfoTextBox.Text = Get-DetailedSystemInfo
+    $statusLabel.Text = "System info refreshed."
+})
+$groupSys.Controls.Add($btnRefreshSys)
+
+$panelSys.Controls.Add($groupSys)
+
+# Product Key Panel
+$panelKey = New-Object System.Windows.Forms.Panel
+$panelKey.Size = $contentPanel.Size
+$panelKey.BackColor = $contentPanel.BackColor
+
+$groupKey = New-Object System.Windows.Forms.GroupBox
+$groupKey.Text = "Product Key"
+$groupKey.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$groupKey.Size = New-Object System.Drawing.Size(600, 220)
+$groupKey.Location = New-Object System.Drawing.Point(15, 15)
+$groupKey.BackColor = [System.Drawing.Color]::FromArgb(235, 240, 255)
+
+$productKeyTextBox = New-Object System.Windows.Forms.TextBox
+$productKeyTextBox.Multiline = $true
+$productKeyTextBox.ScrollBars = "Vertical"
+$productKeyTextBox.Size = New-Object System.Drawing.Size(570, 100)
+$productKeyTextBox.Location = New-Object System.Drawing.Point(15, 40)
+$productKeyTextBox.ReadOnly = $true
+$productKeyTextBox.Font = New-Object System.Drawing.Font("Consolas", 12)
+$groupKey.Controls.Add($productKeyTextBox)
+
+$btnCopyKey = New-Object System.Windows.Forms.Button
+$btnCopyKey.Text = "Copy"
+$btnCopyKey.Size = New-Object System.Drawing.Size(80, 32)
+$btnCopyKey.Location = New-Object System.Drawing.Point(400, 150)
+$btnCopyKey.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnCopyKey.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnCopyKey.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnCopyKey.Add_Click({
+    [System.Windows.Forms.Clipboard]::SetText($productKeyTextBox.Text)
+    $statusLabel.Text = "Product key info copied to clipboard."
+})
+$groupKey.Controls.Add($btnCopyKey)
+
+$btnRefreshKey = New-Object System.Windows.Forms.Button
+$btnRefreshKey.Text = "Refresh"
+$btnRefreshKey.Size = New-Object System.Drawing.Size(80, 32)
+$btnRefreshKey.Location = New-Object System.Drawing.Point(500, 150)
+$btnRefreshKey.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnRefreshKey.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnRefreshKey.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnRefreshKey.Add_Click({
+    $currentKey = Get-WindowsProductKey
+    $backupKey = Get-BackupProductKey
+    $productKeyTextBox.Text = "Current Windows Product Key: $currentKey`r`nBackup Product Key: $backupKey"
+    $statusLabel.Text = "Product key info refreshed."
+})
+$groupKey.Controls.Add($btnRefreshKey)
+
+$panelKey.Controls.Add($groupKey)
+
+# Network Info Panel
+$panelNet = New-Object System.Windows.Forms.Panel
+$panelNet.Size = $contentPanel.Size
+$panelNet.BackColor = $contentPanel.BackColor
+
+$groupNet = New-Object System.Windows.Forms.GroupBox
+$groupNet.Text = "Network Information"
+$groupNet.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$groupNet.Size = New-Object System.Drawing.Size(600, 420)
+$groupNet.Location = New-Object System.Drawing.Point(15, 15)
+$groupNet.BackColor = [System.Drawing.Color]::FromArgb(235, 240, 255)
+
+$networkTextBox = New-Object System.Windows.Forms.TextBox
+$networkTextBox.Multiline = $true
+$networkTextBox.ScrollBars = "Vertical"
+$networkTextBox.Size = New-Object System.Drawing.Size(570, 320)
+$networkTextBox.Location = New-Object System.Drawing.Point(15, 40)
+$networkTextBox.ReadOnly = $true
+$networkTextBox.Font = New-Object System.Drawing.Font("Consolas", 11)
+$groupNet.Controls.Add($networkTextBox)
+
+$btnCopyNet = New-Object System.Windows.Forms.Button
+$btnCopyNet.Text = "Copy"
+$btnCopyNet.Size = New-Object System.Drawing.Size(80, 32)
+$btnCopyNet.Location = New-Object System.Drawing.Point(400, 370)
+$btnCopyNet.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnCopyNet.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnCopyNet.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnCopyNet.Add_Click({
+    [System.Windows.Forms.Clipboard]::SetText($networkTextBox.Text)
+    $statusLabel.Text = "Network info copied to clipboard."
+})
+$groupNet.Controls.Add($btnCopyNet)
+
+$btnRefreshNet = New-Object System.Windows.Forms.Button
+$btnRefreshNet.Text = "Refresh"
+$btnRefreshNet.Size = New-Object System.Drawing.Size(80, 32)
+$btnRefreshNet.Location = New-Object System.Drawing.Point(500, 370)
+$btnRefreshNet.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnRefreshNet.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnRefreshNet.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnRefreshNet.Add_Click({
+    $networkTextBox.Text = Get-NetworkInformation
+    $statusLabel.Text = "Network info refreshed."
+})
+$groupNet.Controls.Add($btnRefreshNet)
+
+$panelNet.Controls.Add($groupNet)
+
+# Install Tools Panel
+$panelInstall = New-Object System.Windows.Forms.Panel
+$panelInstall.Size = $contentPanel.Size
+$panelInstall.BackColor = $contentPanel.BackColor
+
+$groupInstall = New-Object System.Windows.Forms.GroupBox
+$groupInstall.Text = "Installation & Backup Tools"
+$groupInstall.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$groupInstall.Size = New-Object System.Drawing.Size(600, 420)
+$groupInstall.Location = New-Object System.Drawing.Point(15, 15)
+$groupInstall.BackColor = [System.Drawing.Color]::FromArgb(235, 240, 255)
+
+# Define Install Tools Buttons
+$btnUSB = New-Object System.Windows.Forms.Button
+$btnUSB.Text = "Media Creation Tool"
+$btnUSB.Location = New-Object System.Drawing.Point(30, 50)
+$btnUSB.Size = New-Object System.Drawing.Size(260, 40)
+$btnUSB.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnUSB.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnUSB.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$btnUSB.Add_Click({
+    $statusLabel.Text = "Opening Media Creation Tool download page..."
+    Start-Process "https://www.microsoft.com/software-download/windows10" # Or windows11
+    # [System.Windows.Forms.MessageBox]::Show("Media Creation Tool button clicked (placeholder).", "Info", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+})
+
+$btnISO = New-Object System.Windows.Forms.Button
+$btnISO.Text = "Download Windows ISO"
+$btnISO.Location = New-Object System.Drawing.Point(310, 50)
+$btnISO.Size = New-Object System.Drawing.Size(260, 40)
+$btnISO.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnISO.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnISO.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$btnISO.Add_Click({
+    $statusLabel.Text = "Opening Windows ISO download page..."
+    Start-Process "https://www.microsoft.com/en-us/software-download/windows10ISO" # Or windows11
+    # [System.Windows.Forms.MessageBox]::Show("Download ISO button clicked (placeholder).", "Info", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+})
+
+$btnDrivers = New-Object System.Windows.Forms.Button
+$btnDrivers.Text = "Backup Drivers"
+$btnDrivers.Location = New-Object System.Drawing.Point(30, 110)
+$btnDrivers.Size = New-Object System.Drawing.Size(260, 40)
+$btnDrivers.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnDrivers.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnDrivers.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$btnDrivers.Add_Click({
+    $statusLabel.Text = "Driver backup feature placeholder."
+    [System.Windows.Forms.MessageBox]::Show("Driver backup functionality to be implemented. This would typically use Export-WindowsDriver.", "Info", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+})
+
+$btnBackupKey = New-Object System.Windows.Forms.Button
+$btnBackupKey.Text = "Save Product Key"
+$btnBackupKey.Location = New-Object System.Drawing.Point(310, 110)
+$btnBackupKey.Size = New-Object System.Drawing.Size(260, 40)
+$btnBackupKey.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnBackupKey.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnBackupKey.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$btnBackupKey.Add_Click({
+    $keyInfo = "Current Windows Product Key: $(Get-WindowsProductKey)`r`nBackup Product Key: $(Get-BackupProductKey)"
+    $saveFileDialog = New-Object System.Windows.Forms.SaveFileDialog
+    $saveFileDialog.Filter = "Text File (*.txt)|*.txt"
+    $saveFileDialog.Title = "Save Product Key"
+    if ($saveFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        [System.IO.File]::WriteAllText($saveFileDialog.FileName, $keyInfo)
+        $statusLabel.Text = "Product key saved to $($saveFileDialog.FileName)."
+    } else {
+        $statusLabel.Text = "Save product key cancelled."
+    }
+})
+
+$btnRecovery = New-Object System.Windows.Forms.Button
+$btnRecovery.Text = "Recovery Settings"
+$btnRecovery.Location = New-Object System.Drawing.Point(30, 170)
+$btnRecovery.Size = New-Object System.Drawing.Size(260, 40)
+$btnRecovery.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnRecovery.BackColor = [System.Drawing.Color]::FromArgb(200, 220, 255)
+$btnRecovery.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$btnRecovery.Add_Click({
+    $statusLabel.Text = "Opening Recovery settings..."
+    Start-Process "ms-settings:recovery"
+    # [System.Windows.Forms.MessageBox]::Show("Recovery Options button clicked (placeholder).", "Info", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+})
+
+$groupInstall.Controls.AddRange(@($btnUSB, $btnISO, $btnDrivers, $btnBackupKey, $btnRecovery))
+$panelInstall.Controls.Add($groupInstall)
+
+# About Panel
+$panelAbout = New-Object System.Windows.Forms.Panel
+$panelAbout.Size = $contentPanel.Size
+$panelAbout.BackColor = $contentPanel.BackColor
+
+$aboutLabel = New-Object System.Windows.Forms.Label
+$aboutLabel.Text = "WinTool Suite\n\nA modern Windows utility for system info, product keys, backup, and install tools.\n\nCreated with PowerShell.\n\n© $(Get-Date -Format yyyy)"
+$aboutLabel.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Regular)
+$aboutLabel.ForeColor = [System.Drawing.Color]::FromArgb(30, 60, 120)
+$aboutLabel.AutoSize = $true
+$aboutLabel.Location = New-Object System.Drawing.Point(40, 60)
+$panelAbout.Controls.Add($aboutLabel)
+
+# --- Navigation Logic ---
+$panels = @($panelSys, $panelKey, $panelNet, $panelInstall, $panelAbout)
+for ($i = 0; $i -lt $sidebarButtons.Count; $i++) {
+    $idx = $i
+    $sidebarButtons[$i].Add_Click({ Show-Panel $idx })
+}
+
+# Initial content
+$systemInfoTextBox.Text = Get-DetailedSystemInfo
+$currentKey = Get-WindowsProductKey
+$backupKey = Get-BackupProductKey
+$productKeyTextBox.Text = "Current Windows Product Key: $currentKey`r`nBackup Product Key: $backupKey"
+$networkTextBox.Text = Get-NetworkInformation
+Show-Panel 0
+
+# Show the form
+$form.ShowDialog()
+
+# Add tooltips
+$toolTip = New-Object System.Windows.Forms.ToolTip
+$toolTip.SetToolTip($btnUSB, "Download and run the official Windows Media Creation Tool")
+$toolTip.SetToolTip($btnISO, "Download the latest Windows ISO from Microsoft")
+$toolTip.SetToolTip($btnDrivers, "Backup all installed drivers to a folder")
+$toolTip.SetToolTip($btnBackupKey, "Save your product key to a file for safekeeping")
+$toolTip.SetToolTip($btnRecovery, "Open Windows Recovery settings") 
